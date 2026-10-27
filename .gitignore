@@ -1,0 +1,8 @@
+# log files are generated when the scripts run, keep only the folder
+logs/*
+!logs/.gitkeep
+
+# editor / OS junk
+*.swp
+*~
+.DS_Store
