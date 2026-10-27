@@ -84,4 +84,89 @@ fi
 echo "Resolved addresses:"
 echo "$addresses" | sed 's/^/  /'
 log INFO "Resolved $host to $(echo "$addresses" | tr '\n' ' ')"
-exit 0
+echo
+
+# from here on we keep going even if one check fails, and report at the end
+failed=0
+
+# try to open a TCP connection, gives up after 3 seconds
+# $1 = host, $2 = port. Uses bash's built in /dev/tcp so no extra tools needed
+tcp_check() {
+    timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>/dev/null
+}
+
+# ---- basic connectivity ----
+
+echo "--- Connectivity ---"
+if command -v ping >/dev/null 2>&1; then
+    if ping -c 2 -W 2 "$host" >/dev/null 2>&1; then
+        echo "OK: $host replied to ping"
+        log INFO "Ping to $host succeeded"
+    else
+        echo "FAIL: $host did not reply to ping (it may be down or blocking ICMP)"
+        log WARN "Ping to $host failed"
+        failed=1
+    fi
+elif [[ -n "$port" ]]; then
+    # no ping, but the TCP port check below already tells us if the host is reachable
+    echo "ping is not installed, the TCP port check below will be used instead"
+    log INFO "ping not installed, relying on TCP port $port check"
+else
+    # some minimal systems/containers don't have ping, so try common web ports instead
+    echo "ping is not installed, trying a TCP connection on port 80/443 instead"
+    if tcp_check "$host" 80 || tcp_check "$host" 443; then
+        echo "OK: $host accepted a TCP connection on port 80 or 443"
+        log INFO "TCP fallback connectivity to $host succeeded"
+    else
+        echo "FAIL: could not connect to $host on port 80 or 443"
+        log WARN "TCP fallback connectivity to $host failed"
+        failed=1
+    fi
+fi
+echo
+
+# ---- network interfaces ----
+
+echo "--- Network interfaces ---"
+if command -v ip >/dev/null 2>&1; then
+    ip -brief address show
+elif command -v ifconfig >/dev/null 2>&1; then
+    ifconfig -a
+else
+    # last option: read the interface list straight from /sys
+    for iface in /sys/class/net/*; do
+        name=$(basename "$iface")
+        state=$(cat "$iface/operstate" 2>/dev/null || echo unknown)
+        mac=$(cat "$iface/address" 2>/dev/null || echo unknown)
+        printf '%-12s %-8s %s\n' "$name" "$state" "$mac"
+    done
+fi
+log INFO "Displayed network interface information"
+echo
+
+# ---- TCP port (only if a port was given) ----
+
+if [[ -n "$port" ]]; then
+    echo "--- TCP port $port ---"
+    if tcp_check "$host" "$port"; then
+        echo "OK: port $port on $host is open"
+        log INFO "TCP port $port on $host is open"
+    else
+        echo "FAIL: port $port on $host is closed or not reachable"
+        log WARN "TCP port $port on $host is closed or unreachable"
+        failed=1
+    fi
+    echo
+fi
+
+# ---- summary ----
+
+if (( failed == 0 )); then
+    echo "Result: all checks passed for $host"
+    log INFO "Network check for $host finished - all checks passed"
+    exit 0
+fi
+
+echo "Result: one or more checks failed for $host"
+log WARN "Network check for $host finished - some checks failed"
+exit 1
